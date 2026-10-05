@@ -173,9 +173,17 @@ gh attestation verify oci://ghcr.io/jn-aman/m365-agent-gateway:latest --owner jn
 To use it with Compose, replace `build: .` with
 `image: ghcr.io/jn-aman/m365-agent-gateway:latest`.
 
-To cut a release, bump `version` in `pyproject.toml`, then push a matching tag:
-`git tag v0.1.0 && git push origin v0.1.0`. The release workflow reruns all
-checks, pushes the image, and creates the GitHub release.
+To cut a release, run the Release workflow on `main` and pick `patch`, `minor`, or
+`major`:
+
+```bash
+gh workflow run release.yml --ref main -f bump=patch
+```
+
+It runs all checks, bumps the version in `pyproject.toml` and `uv.lock`, commits,
+tags `vX.Y.Z`, then publishes the image and the GitHub release from that tag.
+Pushing a `vX.Y.Z` tag by hand also publishes it, provided it matches the version
+in `pyproject.toml`.
 
 ## Other clients
 

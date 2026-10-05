@@ -1,8 +1,15 @@
 name: Release
+# Run from main to bump the version, tag, and publish. Run from (or push) a vX.Y.Z tag to publish that tag.
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump (used when run from main)
+        type: choice
+        options: [patch, minor, major]
+        default: patch
 permissions:
   contents: read
 concurrency:
@@ -11,8 +18,47 @@ concurrency:
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
+  bump:
+    needs: checks
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Require default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Run the release from ${{ github.event.repository.default_branch }}"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.8.22
+      - name: Bump version, commit, tag, push
+        env:
+          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          old=$(uv version --short)
+          uv version --bump "$BUMP" --frozen
+          new=$(uv version --short)
+          # Edit only this package's entry so the bump never re-resolves the lock.
+          sed -i "/^name = \"m365-agent-gateway\"\$/{n;s/^version = \"$old\"\$/version = \"$new\"/}" uv.lock
+          grep -A1 '^name = "m365-agent-gateway"$' uv.lock | grep -qx "version = \"$new\""
+          uv lock --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "Release v$new"
+          git tag -a "v$new" -m "v$new"
+          git push --atomic origin "HEAD:$GITHUB_REF_NAME" "v$new"
+          # Tags pushed with GITHUB_TOKEN do not trigger workflows, so start the publish run explicitly.
+          gh workflow run release.yml --ref "v$new"
+          echo "Started publish run for v$new" >> "$GITHUB_STEP_SUMMARY"
   image:
     needs: checks
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -22,7 +68,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tag matches package version
-        if: github.ref_type == 'tag'
         run: |
           version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
@@ -43,7 +88,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=branch
             type=sha
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -64,7 +108,6 @@ jobs:
           push-to-registry: true
   github-release:
     needs: image
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
