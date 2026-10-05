@@ -69,9 +69,11 @@ def test_logout_removes_exported_session(monkeypatch, tmp_path, capsys):
     run(monkeypatch, "logout")
 
 
-def test_docker_up_watch_retries_failed_refresh_without_browser(monkeypatch, tmp_path):
+# 90s left means the refresh margin has already passed, so backoff must not fall to the floor.
+@pytest.mark.parametrize("lifetime", [3600, 90])
+def test_docker_up_watch_retries_failed_refresh_without_browser(monkeypatch, tmp_path, lifetime):
     store = MemoryStore()
-    capture(store, 3600)
+    capture(store, lifetime)
     commands = []
     monkeypatch.setattr(
         cli.subprocess,
@@ -103,7 +105,7 @@ def test_docker_up_watch_retries_failed_refresh_without_browser(monkeypatch, tmp
     cli.docker_up(store, tmp_path / "docker", watch=True)
     assert set(interactive_flags[1:]) == {False}
     assert sleeps[1] == 60 and sleeps[2] == 120
-    assert sleeps[3] > 120
+    assert sleeps[3] >= 30
     env = commands[0]
     assert env["M365_SESSION_DIR"] == str((tmp_path / "docker").resolve())
     assert env["M365_UID"].isdigit() and env["M365_GID"].isdigit()

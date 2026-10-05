@@ -167,7 +167,7 @@ def docker_up(store: SecretStore, directory: Path, watch: bool) -> None:
                 wait = 0
             # Floor also covers laptop sleep, where the token may already be expired.
             delay = max(30, wait)
-            time.sleep(min(retry, delay) if retry else delay)
+            time.sleep(retry or delay)
             try:
                 ensure_session(store, interactive=False)
                 export_session(store, directory)
