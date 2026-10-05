@@ -133,17 +133,19 @@ uv run m365-agent-gateway docker-up --no-watch   # start and exit
 1. Reuses a valid session, otherwise refreshes headlessly from the saved browser
    sign-in, and opens a login window only if that fails.
 2. Exports `~/.local/state/m365-agent-gateway/docker/session.json` (mode 0600).
-3. Runs `docker compose up -d --build`.
+3. Runs `docker compose up -d --build`, passing your uid and gid and the export
+   directory to Compose.
 4. Refreshes and re-exports 10 minutes before each token expiry (tokens last about
-   an hour). The container reads the new file without a restart. Ctrl+C stops
-   refreshing; the container keeps running.
+   an hour), headlessly only. If a refresh fails it warns and retries with backoff
+   (1 to 10 minutes) instead of opening a browser. The container reads the new file
+   without a restart. Ctrl+C stops refreshing; the container keeps running.
 
 Manual equivalent:
 
 ```bash
 uv run m365-agent-gateway login
 uv run m365-agent-gateway export-session
-docker compose up -d --build
+docker compose up -d --build   # set M365_SESSION_DIR, M365_UID, M365_GID as below
 # about hourly:
 uv run m365-agent-gateway refresh --headless && uv run m365-agent-gateway export-session
 ```
@@ -154,11 +156,17 @@ Notes:
   in your Copilot history about once an hour.
 - Port `127.0.0.1:47821` only. Never publish it on another interface: the API has
   no authentication. Stop any host `serve` first.
+- On native Linux Docker a bind mount keeps host ownership, so the container runs
+  as your uid and gid (`M365_UID`, `M365_GID`, set by `docker-up`; default 10001).
+  With the manual commands, run `export M365_UID=$(id -u) M365_GID=$(id -g)` first.
 - Hardened: non-root user, read-only filesystem, no capabilities,
   `no-new-privileges`, `/health` healthcheck.
-- Dependencies come from public PyPI. Behind TLS inspection, build with a CA
-  bundle: `docker build --secret id=ca,src=/path/ca.pem .`.
-- CI builds the image and smoke-tests it without a session.
+- The image is built from `uv.lock` (exact locked runtime dependencies) and omits
+  Playwright and dev tools, since login stays on the host. Base images are pinned
+  by digest. Behind TLS inspection, build with a CA bundle:
+  `docker build --secret id=ca,src=/path/ca.pem .`.
+- CI builds the image, checks that it has no browser, and smoke-tests it without a
+  session.
 
 ### Prebuilt image
 
@@ -170,8 +178,12 @@ docker pull ghcr.io/jn-aman/m365-agent-gateway:latest
 gh attestation verify oci://ghcr.io/jn-aman/m365-agent-gateway:latest --owner jn-aman
 ```
 
-To use it with Compose, replace `build: .` with
-`image: ghcr.io/jn-aman/m365-agent-gateway:latest`.
+To use it with Compose instead of building, export the session on the host, then:
+
+```bash
+uv run m365-agent-gateway export-session
+M365_IMAGE=ghcr.io/jn-aman/m365-agent-gateway:latest docker compose up -d --no-build
+```
 
 To cut a release, run the Release workflow on `main` and pick `patch`, `minor`, or
 `major`:
@@ -203,8 +215,8 @@ configs and never overwrites files.
 | `login` | Interactive browser sign-in and session capture |
 | `refresh [--headless]` | Renew session; `--headless` reuses the saved sign-in |
 | `status` | Session expiry, no tokens |
-| `logout` | Delete local session and browser state |
-| `serve [--port] [--host]` | Run the HTTP API |
+| `logout` | Delete local session, browser state, and the exported Docker session file |
+| `serve [--port] [--host]` | Run the HTTP API; `--host 0.0.0.0` only works in the container |
 | `export-session [--output]` | Write session file for Docker |
 | `docker-up [--output] [--no-watch]` | Docker end to end |
 | `client NAME` / `configure` | Client launch and config |
@@ -218,13 +230,20 @@ configs and never overwrites files.
 | `M365_TIMEOUT` | `120` | Request timeout in seconds, max `600` |
 | `M365_EMULATE_TOOLS` | `1` | `0` disables tool emulation |
 | `M365_SESSION_FILE` | unset | Read session from a file instead of the keyring (set in Docker) |
-| `M365_SESSION_DIR` | `~/.local/state/m365-agent-gateway/docker` | Host dir Compose mounts |
+| `M365_SESSION_DIR` | `~/.local/state/m365-agent-gateway/docker` | Host dir Compose mounts (`docker-up` sets it to the export directory) |
+| `M365_IMAGE` | `m365-agent-gateway` | Image Compose runs; set to the GHCR image to skip building |
+| `M365_UID`, `M365_GID` | `10001` | User the container runs as (`docker-up` sets your own) |
 | `XDG_STATE_HOME` | `~/.local/state` | Parent of private state |
 
 ## Security and limits
 
-- Session and browser state live only in the OS keyring (or the 0600 exported
-  file for Docker). No plaintext fallback. TLS uses verified OS trust.
+- Session and browser state live in the OS keyring. The Docker export is the one
+  exception: it writes the live bearer token to a 0600 plaintext file, which
+  `logout` deletes (a running container keeps its session until you run
+  `docker compose down`). TLS uses verified OS trust.
+- There is no API key. Protection is the loopback bind, a Host allowlist, and
+  rejection of any `Origin` header. Other processes or users on your machine can
+  still reach the port. `serve` refuses non-loopback hosts outside the container.
 - Each request is a fresh Copilot conversation with the full transcript.
   Responses `store: true` history is in memory only (64 entries, 30 minutes).
 - Only images in a request are uploaded. No telemetry.
@@ -240,6 +259,8 @@ configs and never overwrites files.
 ## Development
 
 ```bash
+uv sync --extra dev
+uv lock --check
 uv run ruff check src tests
 uv run ruff format --check src tests
 uv run pytest --cov=m365_agent_gateway

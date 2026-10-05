@@ -13,8 +13,14 @@ from .errors import GatewayError
 def write_configs(directory: Path, port: int) -> list[Path]:
     if not 1 <= port <= 65535:
         raise GatewayError("Invalid local port.")
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    directory.chmod(0o700)
+    try:
+        try:
+            directory.mkdir(mode=0o700, parents=True)
+            directory.chmod(0o700)
+        except FileExistsError:
+            pass
+    except OSError:
+        raise GatewayError(f"Cannot write client configs to {directory}.", "write_failed") from None
     base = f"http://127.0.0.1:{port}"
     environment = {
         "ANTHROPIC_BASE_URL": base,
@@ -76,10 +82,13 @@ def write_configs(directory: Path, port: int) -> list[Path]:
     paths = [directory / name for name in documents]
     if any(path.exists() or path.is_symlink() for path in paths):
         raise GatewayError("Client configs already exist; choose a new output directory.")
-    for name, content in documents.items():
-        descriptor = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(content + "\n")
+    try:
+        for name, content in documents.items():
+            descriptor = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(content + "\n")
+    except OSError:
+        raise GatewayError(f"Cannot write client configs to {directory}.", "write_failed") from None
     return paths
 
 

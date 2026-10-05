@@ -7,14 +7,22 @@ Trusted: OS account, unlocked credential store, installed client, authorized log
 Untrusted: prompts, model calls, retrieved work/web content, tool results, schemas,
 JSON requests, and network response shapes.
 
-Local service uses key authentication, host/Origin checks, bounded bodies/context,
-rate limits, deadlines, sanitized errors, and verified TLS. It does not isolate
-against malicious processes running as the same OS user. Generated client files
-are private but contain credentials. Never enable debug URL logging or local-variable
-traceback capture. Upstream WebSocket token is in query as required by web protocol.
+There is no API key authentication. The local service relies on a loopback bind,
+a Host allowlist, and rejection of any request carrying an Origin header, which
+blocks DNS rebinding and browser CSRF. It also bounds bodies and context, applies
+a local rate limit and deadlines, sanitizes errors, and verifies TLS. Non-loopback
+binds are refused outside the container, where the port must be published on host
+loopback only. It does not protect against other processes or users on the same
+machine: any local client that can reach the port can use your session. Generated
+client files are private and contain only a placeholder key. Never enable debug URL
+logging or local-variable traceback capture. Upstream WebSocket token is in query
+as required by web protocol.
 
 Tokens and browser state use explicit macOS Keychain or Linux Secret Service.
-No plaintext fallback. Logout clears local authentication, not cloud sessions.
+No plaintext fallback, with one exception: `export-session` and `docker-up` write
+the live bearer token to a 0600 plaintext file for the Docker container, which
+`logout` deletes. A running container keeps its session until stopped. Logout
+clears local authentication, not cloud sessions.
 
 Tool validation is not authorization. Clients must enforce human approvals,
 filesystem/process/network boundaries, and sandboxing. Schema-valid calls can

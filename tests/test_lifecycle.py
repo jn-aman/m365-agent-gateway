@@ -212,9 +212,9 @@ async def test_browser_capture_is_keyring_only(monkeypatch):
     assert closed
 
 
-def test_cli_status_and_logout(monkeypatch, capsys):
+def test_cli_status_and_logout(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     store = MemoryStore()
-    store.put("api-key", "obsolete-local-key")
     monkeypatch.setattr(cli, "SecretStore", lambda: store)
     monkeypatch.setattr("sys.argv", ["gateway", "status"])
     cli.main()
@@ -222,7 +222,6 @@ def test_cli_status_and_logout(monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["gateway", "logout"])
     cli.main()
     assert "removed" in capsys.readouterr().out
-    assert store.get("api-key") is None
 
 
 def test_cli_serve_enables_access_logs(monkeypatch):

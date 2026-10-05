@@ -1,35 +1,73 @@
 name: Checks
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   workflow_call:
+  schedule:
+    # Weekly, so pip-audit catches newly published advisories.
+    - cron: '17 6 * * 1'
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  UV_LOCKED: '1'
 jobs:
-  check:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.11.26'
+          enable-cache: true
+          python-version: '3.12'
+      - run: uv lock --check
+      - run: uv sync --locked --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run pip-audit
+  test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ['3.11', '3.12', '3.13']
+        include:
+          - {os: ubuntu-24.04, python: '3.11'}
+          - {os: ubuntu-24.04, python: '3.12'}
+          - {os: ubuntu-24.04, python: '3.13'}
+          - {os: ubuntu-24.04, python: '3.14'}
+          - {os: macos-latest, python: '3.11'}
+          - {os: macos-latest, python: '3.14'}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.11.26'
+          enable-cache: true
           python-version: ${{ matrix.python }}
-      - run: python -m pip install uv==0.8.22
-      - run: uv sync --frozen --extra dev
-      - run: uv run ruff check src tests
-      - run: uv run ruff format --check src tests
+      - run: uv sync --locked --extra dev
       - run: uv run pytest --cov=m365_agent_gateway --cov-fail-under=80
-      - run: uv run pip-audit
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker compose config -q
       - run: docker build -t m365-agent-gateway .
+      - name: Image excludes the browser dependency
+        run: |
+          if docker run --rm --entrypoint python m365-agent-gateway -c "import playwright"; then
+            echo "::error::playwright must not be installed in the image"
+            exit 1
+          fi
       - name: Smoke test container without a session
         run: |
           mkdir -m 700 session

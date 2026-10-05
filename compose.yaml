@@ -1,7 +1,9 @@
 services:
   gateway:
     build: .
-    image: m365-agent-gateway
+    image: ${M365_IMAGE:-m365-agent-gateway}
+    # Match the host owner so the 0700 export directory is readable on native Linux Docker.
+    user: "${M365_UID:-10001}:${M365_GID:-10001}"
     # Publish on host loopback only; the API has no key authentication.
     ports:
       - "127.0.0.1:47821:47821"

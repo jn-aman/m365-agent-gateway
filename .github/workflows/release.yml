@@ -17,25 +17,28 @@ concurrency:
   cancel-in-progress: false
 jobs:
   checks:
+    # The bump run checks main; the tag run it dispatches publishes without repeating them.
+    if: github.ref_type == 'branch' || github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
   bump:
     needs: checks
     if: github.ref_type == 'branch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       actions: write
     steps:
       - name: Require default branch
         if: github.ref_name != github.event.repository.default_branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          echo "::error::Run the release from ${{ github.event.repository.default_branch }}"
+          echo "::error::Run the release from $DEFAULT_BRANCH"
           exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: '3.12'
-      - run: python -m pip install uv==0.8.22
+          version: '0.11.26'
       - name: Bump version, commit, tag, push
         env:
           BUMP: ${{ inputs.bump }}
@@ -58,8 +61,8 @@ jobs:
           echo "Started publish run for v$new" >> "$GITHUB_STEP_SUMMARY"
   image:
     needs: checks
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' && !failure() && !cancelled()
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -67,6 +70,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check tag matches package version
         run: |
           version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
@@ -108,7 +113,7 @@ jobs:
           push-to-registry: true
   github-release:
     needs: image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
