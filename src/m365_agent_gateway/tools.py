@@ -21,19 +21,21 @@ REGEX_PATTERN_COUNT_LIMIT = 128
 _regex_matches: ContextVar[list[int] | None] = ContextVar("regex_matches", default=None)
 
 
-def bounded_tree(value: Any, depth: int = 0) -> None:
+def bounded_tree(value: Any, depth: int = 0, schema: bool = False) -> None:
     if depth > 32:
         raise GatewayError("JSON nesting exceeds 32 levels.")
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"$ref", "$dynamicRef", "$recursiveRef"} and (
-                not isinstance(child, str) or not child.startswith("#")
+            if (
+                schema
+                and key in {"$ref", "$dynamicRef", "$recursiveRef"}
+                and (not isinstance(child, str) or not child.startswith("#"))
             ):
                 raise GatewayError("Only local JSON Schema references are supported.")
-            bounded_tree(child, depth + 1)
+            bounded_tree(child, depth + 1, schema)
     elif isinstance(value, list):
         for child in value:
-            bounded_tree(child, depth + 1)
+            bounded_tree(child, depth + 1, schema)
 
 
 @dataclass(frozen=True)
@@ -47,10 +49,10 @@ class Tool:
             raise GatewayError("Tool names must contain 1 to 128 characters.")
         if len(json.dumps(self.schema)) > 64_000:
             raise GatewayError("Tool schema exceeds 64 KB.")
-        bounded_tree(self.schema)
+        bounded_tree(self.schema, schema=True)
         validate_regex_schema(self.schema)
         try:
-            Draft202012Validator.check_schema(self.schema)
+            safe_validator(self.schema).check_schema(self.schema)
         except SchemaError:
             raise GatewayError("Invalid tool JSON Schema.") from None
 
@@ -119,13 +121,20 @@ def validate_pattern_properties(
                 yield from validator.descend(value, subschema, path=key, schema_path=pattern)
 
 
-SafeDraft202012Validator = validators.extend(
-    Draft202012Validator,
-    validators={
-        "pattern": validate_pattern,
-        "patternProperties": validate_pattern_properties,
-    },
-)
+_safe_validators: dict[type, type] = {}
+
+
+def safe_validator(schema: Any) -> Any:
+    base = validators.validator_for(schema, default=Draft202012Validator)
+    if base not in _safe_validators:
+        _safe_validators[base] = validators.extend(
+            base,
+            validators={
+                "pattern": validate_pattern,
+                "patternProperties": validate_pattern_properties,
+            },
+        )
+    return _safe_validators[base]
 
 
 def deny_remote_resource(uri: str) -> Any:
@@ -158,6 +167,9 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+ENVELOPE_START = regex.compile(r'\{\s*"(?:text|calls)"\s*:')
+
+
 def extract_envelope(raw: str) -> str | None:
     cleaned = raw.strip()
     fence = regex.fullmatch(r"```[a-zA-Z]*\s*\n?(.*?)\n?\s*```", cleaned, regex.DOTALL)
@@ -165,13 +177,15 @@ def extract_envelope(raw: str) -> str | None:
         cleaned = fence.group(1).strip()
     if cleaned.startswith("{"):
         return cleaned
-    start = cleaned.find('{"text"')
-    if start < 0:
-        start = cleaned.find('{"calls"')
-    if start < 0:
-        return None
-    end = cleaned.rfind("}")
-    return cleaned[start : end + 1] if end > start else cleaned[start:]
+    decoder = json.JSONDecoder()
+    for match in ENVELOPE_START.finditer(cleaned):
+        try:
+            value, end = decoder.raw_decode(cleaned, match.start())
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(value, dict) and set(value) == {"text", "calls"}:
+            return cleaned[match.start() : end]
+    return None
 
 
 def decode_reply(raw: str, tools: list[Tool], choice: str = "auto") -> Reply:
@@ -211,7 +225,7 @@ def decode_reply(raw: str, tools: list[Tool], choice: str = "auto") -> Reply:
         try:
             token = _regex_matches.set([0])
             try:
-                SafeDraft202012Validator(
+                safe_validator(declared[name].schema)(
                     declared[name].schema, registry=Registry(retrieve=deny_remote_resource)
                 ).validate(arguments)
             finally:

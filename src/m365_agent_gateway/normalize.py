@@ -41,6 +41,11 @@ class Turn:
     parallel: bool
 
 
+def field(body: dict[str, Any], key: str, default: Any) -> Any:
+    value = body.get(key)
+    return default if value is None else value
+
+
 def data_image(value: Any, max_bytes: int) -> ImageData:
     if not isinstance(value, str) or not value.startswith("data:") or "," not in value:
         raise GatewayError("Only base64 image data URLs are supported.", "unsupported_feature")
@@ -141,20 +146,20 @@ def _normalize(
     settings: Settings,
     history: list[dict[str, Any]] | None = None,
 ) -> Turn:
-    model = body.get("model", settings.model)
+    model = field(body, "model", settings.model)
     if not isinstance(model, str) or model not in MODEL_OPTIONS:
         raise GatewayError("Unknown model; select a model from /v1/models.")
     tone = MODEL_OPTIONS[model][1]
-    if body.get("n", 1) != 1:
+    if field(body, "n", 1) != 1:
         raise GatewayError("Only one completion is supported.", "unsupported_feature")
-    thinking = body.get("thinking", {}).get("type", "disabled")
+    thinking = field(body, "thinking", {}).get("type", "disabled")
     # Upstream has no thinking switch; tone decides, so the request flag is advisory.
     if thinking not in {"disabled", "enabled", "adaptive"}:
         raise GatewayError("Unsupported thinking mode.", "unsupported_feature")
-    if body.get("response_format", {}).get("type", "text") != "text":
+    if field(body, "response_format", {}).get("type", "text") != "text":
         raise GatewayError("Constrained output formats are not supported.", "unsupported_feature")
     tools = []
-    for item in body.get("tools", []):
+    for item in field(body, "tools", []):
         if not isinstance(item, dict):
             raise GatewayError("Invalid tool definition.")
         if protocol == "anthropic":
@@ -176,7 +181,7 @@ def _normalize(
         raise GatewayError("Tools must be unique and limited to 128.")
     if tools and not settings.emulate_tools:
         raise GatewayError("Experimental tool emulation is disabled.", "unsupported_feature")
-    choice = body.get("tool_choice", "auto")
+    choice = field(body, "tool_choice", "auto")
     if isinstance(choice, dict):
         if choice.get("type") == "auto":
             choice = "auto"
@@ -186,22 +191,32 @@ def _normalize(
             choice = choice.get("function", choice).get("name")
     if not isinstance(choice, str):
         raise GatewayError("Invalid tool choice.")
-    stream = body.get("stream", False)
+    stream = field(body, "stream", False)
     if not isinstance(stream, bool):
         raise GatewayError("stream must be boolean.")
-    budget = body.get("max_tokens", body.get("max_output_tokens", settings.max_output // 4))
+    budget = settings.max_output // 4
+    for key in ("max_completion_tokens", "max_tokens", "max_output_tokens"):
+        if body.get(key) is not None:
+            budget = body[key]
+            break
     if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
         raise GatewayError("Output budget must be a positive integer.")
     messages = list(history or [])
     images: list[ImageData] = []
-    instructions = body.get("system", body.get("instructions"))
+    instructions = field(body, "system", body.get("instructions"))
     if instructions is not None:
         messages.append({"role": "system", "content": text_content(instructions)})
     incoming = body.get("input") if protocol == "responses" else body.get("messages")
     if isinstance(incoming, str) and protocol == "responses":
         incoming = [{"role": "user", "content": incoming}]
-    if not isinstance(incoming, list) or not incoming or len(incoming) > 512:
-        raise GatewayError("Supply 1 to 512 messages/input items.")
+    if not isinstance(incoming, list) or not incoming:
+        raise GatewayError("Supply a non-empty list of messages/input items.")
+    if len(incoming) > 512:
+        raise GatewayError(
+            "Conversation exceeds local context limit; start a fresh session.",
+            "context_limit",
+            413,
+        )
     for message in incoming:
         if not isinstance(message, dict):
             raise GatewayError("Messages must be objects.")
@@ -251,7 +266,9 @@ def _normalize(
                         {
                             "role": "tool",
                             "tool_call_id": block.get("tool_use_id"),
-                            "content": text_content(block.get("content")),
+                            "content": text_content(
+                                block.get("content"), images, protocol, settings.max_body
+                            ),
                             "is_error": block.get("is_error", False),
                         }
                     )
@@ -289,7 +306,9 @@ def _normalize(
         raise GatewayError(
             "Conversation exceeds local context limit; start a fresh session.", "context_limit", 413
         )
-    parallel = body.get("parallel_tool_calls", True)
+    if len(images) > 20:
+        raise GatewayError("At most 20 images per request.", "unsupported_feature")
+    parallel = field(body, "parallel_tool_calls", True)
     if isinstance(body.get("tool_choice"), dict):
         parallel = parallel and not body["tool_choice"].get("disable_parallel_tool_use", False)
     return Turn(

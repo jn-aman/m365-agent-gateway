@@ -1,6 +1,7 @@
 """Single bounded generation path shared by all client protocols."""
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -11,6 +12,7 @@ from .config import Settings
 from .errors import GatewayError
 from .normalize import ImageData, Turn
 from .tools import Reply, decode_reply, render_prompt
+from .upstream import MAX_FRAME_BYTES
 
 
 class Upstream(Protocol):
@@ -25,14 +27,23 @@ class Result:
     limited: bool = False
 
 
-async def generate(
-    turn: Turn, upstream: Upstream, settings: Settings
-) -> AsyncIterator[str | Result]:
+def prepare(turn: Turn, settings: Settings) -> str:
     prompt = render_prompt(turn.messages, turn.tools, turn.choice, len(turn.images))
     if len(prompt) > settings.max_prompt:
         raise GatewayError(
             "Prompt plus tool definitions exceeds context limit.", "context_limit", 413
         )
+    # The escaped prompt alone is a lower bound of the frame, so this never rejects a valid one.
+    if len(json.dumps(prompt)) > MAX_FRAME_BYTES:
+        raise GatewayError("Prompt exceeds Copilot's ~2 MB request limit.", "context_limit", 413)
+    return prompt
+
+
+async def generate(
+    turn: Turn, upstream: Upstream, settings: Settings, prompt: str | None = None
+) -> AsyncIterator[str | Result]:
+    if prompt is None:
+        prompt = prepare(turn, settings)
     buffered = bool(turn.tools and turn.choice != "none")
     output = ""
     iterator = upstream.stream(prompt, turn.tone, turn.images)

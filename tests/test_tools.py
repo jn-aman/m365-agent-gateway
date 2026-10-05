@@ -3,7 +3,13 @@ import json
 import pytest
 
 from m365_agent_gateway.errors import GatewayError
-from m365_agent_gateway.tools import Tool, decode_reply, render_prompt
+from m365_agent_gateway.tools import (
+    Tool,
+    bounded_tree,
+    decode_reply,
+    extract_envelope,
+    render_prompt,
+)
 
 
 @pytest.fixture
@@ -138,3 +144,56 @@ def test_history_is_serialized_without_executing_content(tool):
     )
     assert "permission denied" in prompt
     assert "call_1" in prompt
+
+
+def test_pretty_printed_envelope_after_prose(tool):
+    call = '{"name": "read_file", "arguments": {"path": "a"}}'
+    raw = f'I will read it.\n{{\n  "text": "",\n  "calls": [\n    {call}\n  ]\n}}'
+    assert decode_reply(raw, [tool]).calls[0].arguments == {"path": "a"}
+
+
+def test_nested_text_object_in_arguments_is_not_the_envelope():
+    schema = {"type": "object", "properties": {"note": {"type": "object"}}}
+    note = Tool("note", "", schema)
+    call = '{"name": "note", "arguments": {"note": {"text": 1, "calls": 2}}}'
+    raw = f'Sure: {{"calls": [{call}], "text": ""}}'
+    assert decode_reply(raw, [note]).calls[0].arguments == {"note": {"text": 1, "calls": 2}}
+    assert extract_envelope('prose {"text": "a"} more') is None
+
+
+def test_draft07_tuple_items_and_draft04_boolean_exclusive_minimum():
+    tuple_tool = Tool(
+        "pair",
+        "",
+        {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": {
+                "p": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]}
+            },
+        },
+    )
+    old = Tool(
+        "num",
+        "",
+        {
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "type": "object",
+            "properties": {"n": {"type": "number", "minimum": 1, "exclusiveMinimum": True}},
+        },
+    )
+    ok = '{"text":"","calls":[{"name":"pair","arguments":{"p":["a",1]}}]}'
+    assert decode_reply(ok, [tuple_tool, old]).calls[0].name == "pair"
+    bad = '{"text":"","calls":[{"name":"pair","arguments":{"p":["a","b"]}}]}'
+    with pytest.raises(GatewayError):
+        decode_reply(bad, [tuple_tool, old])
+    edge = '{"text":"","calls":[{"name":"num","arguments":{"n":1}}]}'
+    with pytest.raises(GatewayError):
+        decode_reply(edge, [tuple_tool, old])
+    assert decode_reply(edge.replace('"n":1', '"n":2'), [tuple_tool, old]).calls[0].name == "num"
+
+
+def test_ref_rule_applies_to_schemas_only():
+    bounded_tree({"input": {"$ref": "https://x.test"}})
+    with pytest.raises(GatewayError):
+        bounded_tree({"$ref": "https://x.test"}, schema=True)

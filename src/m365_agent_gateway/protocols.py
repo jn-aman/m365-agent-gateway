@@ -188,6 +188,21 @@ class WireStream:
             self.response_event("response.in_progress", response=stub),
         ]
 
+    def fail(self, code: str, message: str) -> list[str]:
+        envelope = {
+            "id": self.id,
+            "object": "response",
+            "status": "failed",
+            "model": self.model,
+            "created_at": int(time.time()),
+            "output": [],
+            "error": {"code": code, "message": message},
+        }
+        return [
+            self.response_event("error", code=code, message=message, param=None),
+            self.response_event("response.failed", response=envelope),
+        ]
+
     def delta(self, text: str) -> list[str]:
         events = []
         if not self.started_text:

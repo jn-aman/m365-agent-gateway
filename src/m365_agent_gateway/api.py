@@ -1,4 +1,4 @@
-"""Authenticated localhost-only HTTP compatibility service."""
+"""Localhost-only HTTP compatibility service."""
 
 import asyncio
 import json
@@ -14,21 +14,37 @@ import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import __version__
 from .config import Settings
 from .errors import GatewayError
 from .normalize import MODEL_OPTIONS, normalize
 from .protocols import WireStream, complete, sse
-from .service import Result, Upstream, generate
+from .service import Result, Upstream, generate, prepare
 from .tools import bounded_tree, reject_constant, unique_object
 
+HISTORY_CHARS = 32_000_000
 logger = logging.getLogger("uvicorn.error")
 
 
+ANTHROPIC_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    529: "overloaded_error",
+}
+
+
 def error_body(error: GatewayError, anthropic: bool) -> dict[str, Any]:
-    if anthropic and error.code == "context_limit":
+    if not anthropic:
+        return {"type": error.code, "message": str(error)}
+    if error.code == "context_limit":
         # Claude Code auto-compacts only on Anthropic's own too-long wording.
         return {"type": "invalid_request_error", "message": f"prompt is too long: {error}"}
-    return {"type": error.code, "message": str(error)}
+    kind = ANTHROPIC_TYPES.get(error.status, "api_error" if error.status >= 500 else None)
+    return {"type": kind or "invalid_request_error", "message": str(error)}
 
 
 def error_response(error: GatewayError, anthropic: bool = False) -> JSONResponse:
@@ -72,9 +88,10 @@ class LocalGuard:
             self.requests.popleft()
         if scope["path"] != "/health":
             if len(self.requests) >= self.settings.rate_per_minute:
-                await error_response(GatewayError("Local rate limit exceeded.", "rate_limit", 429))(
-                    scope, receive, send
-                )
+                await error_response(
+                    GatewayError("Local rate limit exceeded.", "rate_limit", 429),
+                    scope["path"].startswith("/v1/messages"),
+                )(scope, receive, send)
                 return
             self.requests.append(now)
         body = bytearray()
@@ -85,7 +102,8 @@ class LocalGuard:
             body.extend(message.get("body", b""))
             if len(body) > self.settings.max_body:
                 await error_response(
-                    GatewayError("Request body too large.", "request_too_large", 413)
+                    GatewayError("Request body too large.", "request_too_large", 413),
+                    scope["path"].startswith("/v1/messages"),
                 )(scope, receive, send)
                 return
             if not message.get("more_body", False):
@@ -106,6 +124,7 @@ def create_app(settings: Settings, upstream: Upstream) -> FastAPI:
     app = FastAPI(title="M365 Agent Gateway", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(LocalGuard, settings=settings)
     history: OrderedDict[str, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+    sizes: dict[str, int] = {}
 
     @app.exception_handler(GatewayError)
     async def handle_error(request: Request, error: GatewayError) -> JSONResponse:
@@ -114,7 +133,7 @@ def create_app(settings: Settings, upstream: Upstream) -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "version": "0.1.0", "session_verified": False}
+        return {"status": "ok", "version": __version__, "session_verified": False}
 
     @app.get("/v1/models")
     async def models() -> dict[str, Any]:
@@ -174,38 +193,40 @@ def create_app(settings: Settings, upstream: Upstream) -> FastAPI:
                     404,
                 )
             prior = old[1]
-        try:
-            turn = normalize(body, protocol, settings, prior)
-        except (AttributeError, TypeError, KeyError):
-            raise GatewayError("Invalid request field types.") from None
+        turn = normalize(body, protocol, settings, prior)
+        prompt = prepare(turn, settings)
         request_id = {"chat": "chatcmpl_", "anthropic": "msg_", "responses": "resp_"}[
             protocol
         ] + uuid.uuid4().hex
         input_text = json.dumps(turn.messages)
 
         def remember(result: Result) -> None:
-            if protocol != "responses" or body.get("store") is not True:
+            if protocol != "responses" or body.get("store") is False:
                 return
-            history[request_id] = (
-                time.monotonic(),
-                [
-                    *turn.messages,
-                    {
-                        "role": "assistant",
-                        "content": result.reply.text,
-                        "tool_calls": [
-                            {"id": call.id, "name": call.name, "arguments": call.arguments}
-                            for call in result.reply.calls
-                        ],
-                    },
-                ],
-            )
-            while len(history) > 64:
-                history.popitem(last=False)
+            messages = [
+                *turn.messages,
+                {
+                    "role": "assistant",
+                    "content": result.reply.text,
+                    "tool_calls": [
+                        {"id": call.id, "name": call.name, "arguments": call.arguments}
+                        for call in result.reply.calls
+                    ],
+                },
+            ]
+            now = time.monotonic()
+            history[request_id] = (now, messages)
+            sizes[request_id] = len(json.dumps(messages))
+            while history and (
+                len(history) > 64
+                or sum(sizes.values()) > HISTORY_CHARS
+                or next(iter(history.values()))[0] < now - 1800
+            ):
+                sizes.pop(history.popitem(last=False)[0], None)
 
         if not turn.stream:
             result = None
-            async for item in generate(turn, upstream, settings):
+            async for item in generate(turn, upstream, settings, prompt):
                 if isinstance(item, Result):
                     result = item
             if result is None:
@@ -215,7 +236,7 @@ def create_app(settings: Settings, upstream: Upstream) -> FastAPI:
 
         async def stream() -> AsyncIterator[str]:
             wire = WireStream(protocol, request_id, turn.model)
-            iterator = generate(turn, upstream, settings)
+            iterator = generate(turn, upstream, settings, prompt)
             pending = None
             try:
                 for event in wire.start():
@@ -247,18 +268,28 @@ def create_app(settings: Settings, upstream: Upstream) -> FastAPI:
             except GatewayError as error:
                 logger.warning("%s stream failed: %s (%s)", protocol, error.code, error)
                 if protocol == "chat":
-                    message = f"Gateway error ({error.code}): {error}"
-                    yield wire.chat_chunk({"content": message}, "stop")
-                    yield "data: [DONE]\n\n"
+                    yield sse({"error": {**error_body(error, False), "code": error.code}})
+                elif protocol == "responses":
+                    for event in wire.fail(error.code, str(error)):
+                        yield event
                 else:
-                    value = {"type": "error", "error": error_body(error, protocol == "anthropic")}
-                    yield sse(value, "error")
+                    yield sse({"type": "error", "error": error_body(error, True)}, "error")
             except Exception:
                 logger.exception("%s stream failed unexpectedly", protocol)
                 message = "Generation failed; check local status."
                 if protocol == "chat":
-                    yield wire.chat_chunk({"content": f"Gateway error: {message}"}, "stop")
-                    yield "data: [DONE]\n\n"
+                    yield sse(
+                        {
+                            "error": {
+                                "message": message,
+                                "type": "gateway_error",
+                                "code": "gateway_error",
+                            }
+                        }
+                    )
+                elif protocol == "responses":
+                    for event in wire.fail("gateway_error", message):
+                        yield event
                 else:
                     value = {
                         "type": "error",
