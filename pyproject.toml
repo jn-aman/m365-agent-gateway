@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "m365-agent-gateway"
+version = "0.1.0"
+description = "Local macOS/Linux Microsoft 365 agent protocol gateway."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.142.2",
+  "uvicorn==0.54.0",
+  "httpx==0.28.1",
+  "websockets==17.2",
+  "playwright==1.63.0",
+  "keyring==25.7.0",
+  "jsonschema==4.26.0",
+  "mcp==1.30.0",
+  "truststore==0.10.4",
+  "regex==2026.9.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-cov==7.1.0", "ruff==0.16.10", "pip-audit==2.10.1", "openai==3.24.0", "anthropic==1.11.0"]
+
+[project.scripts]
+m365-agent-gateway = "m365_agent_gateway.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/m365_agent_gateway"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

@@ -1,0 +1,20 @@
+services:
+  gateway:
+    build: .
+    image: m365-agent-gateway
+    # Publish on host loopback only; the API has no key authentication.
+    ports:
+      - "127.0.0.1:47821:47821"
+    volumes:
+      # Written by `uv run m365-agent-gateway export-session` on the host.
+      - ${M365_SESSION_DIR:-~/.local/state/m365-agent-gateway/docker}:/run/m365:ro
+    environment:
+      M365_TIMEOUT: ${M365_TIMEOUT:-120}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
