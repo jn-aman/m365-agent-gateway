@@ -113,6 +113,8 @@ jobs:
           push-to-registry: true
   github-release:
     needs: image
+    # Explicit status check: the skipped checks job would otherwise skip this one too.
+    if: github.ref_type == 'tag' && !failure() && !cancelled()
     runs-on: ubuntu-24.04
     permissions:
       contents: write
