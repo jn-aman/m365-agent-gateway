@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.27.0"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,20 +9,20 @@ description = "Local macOS/Linux Microsoft 365 agent protocol gateway."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi==0.142.2",
+  "fastapi==0.143.2",
   "uvicorn==0.54.0",
   "httpx==0.28.1",
   "websockets==17.2",
-  "playwright==1.63.0",
+  "playwright==1.64.0",
   "keyring==25.7.0",
   "jsonschema==4.26.0",
-  "mcp==1.30.0",
-  "truststore==0.10.4",
+  "mcp==2.3.0",
+  "truststore==0.10.5",
   "regex==2026.9.29",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-cov==7.1.0", "ruff==0.16.10", "pip-audit==2.10.1", "openai==3.24.0", "anthropic==1.11.0"]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "pytest-cov==7.1.0", "ruff==0.17.1", "pip-audit==2.10.1", "openai==3.31.0", "anthropic==1.15.0"]
 
 [project.urls]
 Homepage = "https://github.com/jn-aman/m365-agent-gateway"
